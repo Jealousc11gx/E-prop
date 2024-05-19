@@ -1,80 +1,74 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 
-def update_plot1(self, x, z, yo, yt, L, trace_reg, trace_in, trace_rec, trace_out):
+def update_plot(model, x, z, L, trace_in, trace_rec, trace_out, h, fig, ax_list):
 
     # Clear the axis to print new plots
-    for k in range(self.ax_list.shape[0]):
-        ax = self.ax_list[k]
+    for ax in ax_list:
         ax.clear()
 
-    # Plot input signals
-    for k, spike_ref in enumerate(zip(['In spikes', 'Rec spikes'], [x, z])):
-        spikes = spike_ref[1][:, 0, :].cpu().numpy()
-        ax = self.ax_list[k]
+    # Plot input signals (heatmap)
+    ax = ax_list[0]          # shape n_b, n_rec, n_in , n_t
+    ax.imshow(x[0].T.cpu().numpy(), aspect='auto', cmap='hot_r', interpolation="none")
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Input MFCC features')
+    ax.set_title('Input signals (x)')
 
-        ax.imshow(spikes.T, aspect='auto', cmap='hot_r', interpolation="none")
-        ax.set_xlim([0, self.n_t])
-        ax.set_ylabel(spike_ref[0])
+    # Plot recurrent layer spikes (raster plot)  # model.z shape: torch.Size([11, 128, 300])
+    ax = ax_list[1]          # shape: n_b, n_rec, n_rec, n_t         # shape: n_b, n_rec, n_t
+    rec_spikes = z[:, 0, :].cpu().numpy()
+    ax.imshow(rec_spikes.T, aspect='auto', cmap='hot_r', interpolation='nearest')
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Recurrent Neuron')
+    ax.set_title('Recurrent layer spikes (z)')
 
-    for i in range(self.n_out):
-        ax = self.ax_list[i + 2]
-        if self.classif:
-            ax.set_ylim([-0.05, 1.05])
-        ax.set_ylabel('Output ' + str(i))
+    # Plot input traces
+    ax = ax_list[2]
+    ax.plot(np.arange(model.n_t), trace_in[0, 1, 0, :].T.cpu().numpy())  # Light
+    # ax.plot(np.arange(model.n_t), trace_in[0, :, :, :].reshape(model.n_rec * model.n_in, model.n_t).T.cpu().numpy())
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Trace_in')
+    ax.set_title('Input traces')
 
-        ax.plot(np.arange(self.n_t), yo[:, 0, i].cpu().numpy(), linestyle='dashed', label='Output', alpha=0.8)
-        if self.t_crop != 0:
-            ax.plot(np.arange(self.n_t)[-self.t_crop:], yt[-self.t_crop:, 0, i].cpu().numpy(), linestyle='solid',
-                    label='Target', alpha=0.8)
-        else:
-            ax.plot(np.arange(self.n_t), yt[:, 0, i].cpu().numpy(), linestyle='solid', label='Target', alpha=0.8)
+    # Plot recurrent traces
+    ax = ax_list[3]
+    ax.plot(np.arange(model.n_t), trace_rec[0, 1, 0, :].T.cpu().numpy())  # Light
+    # ax.plot(np.arange(model.n_t), trace_rec[0, :, :, :].reshape(model.n_rec * model.n_rec, model.n_t).T.cpu().numpy())
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Trace_rec')
+    ax.set_title('Recurrent traces')
 
-        ax.set_xlim([0, self.n_t])
+    # Plot output traces
+    ax = ax_list[4]
+    ax.plot(np.arange(model.n_t), trace_out[0, 1, :].T.cpu().numpy())
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Trace_out')
+    ax.set_title('Output traces')
 
-    for i in range(5):
-        ax = self.ax_list[i + 2 + self.n_out]
-        ax.set_ylabel(
-            "Trace reg" if i == 0 else "Traces out" if i == 1 else "Traces rec" if i == 2 else "Traces in" if i == 3 else "Learning sigs")
+    # Plot learning signals
+    ax = ax_list[5]
+    for i in range(1, 6):  # change the i-th rec neuron
+        ax.plot(np.arange(model.n_t), L[0, i, :].T.cpu().numpy())  # shape: n_b, n_rec, n_t
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Learning signal')
+    ax.set_title('Learning signals')
 
-        if i == 0:
-            if self.visu_l:
-                ax.plot(np.arange(self.n_t), trace_reg[0, :, 0, :].T.cpu().numpy(), linestyle='dashed',
-                        label='Output', alpha=0.8)
-            else:
-                ax.plot(np.arange(self.n_t),
-                        trace_reg[0, :, :, :].reshape(self.n_rec * self.n_rec, self.n_t).T.cpu().numpy(),
-                        linestyle='dashed', label='Output', alpha=0.8)
-        elif i < 4:
-            if self.visu_l:
-                ax.plot(np.arange(self.n_t), trace_out[0, :, :].T.cpu().numpy() if i == 1 \
-                    else trace_rec[0, :, 0, :].T.cpu().numpy() if i == 2 \
-                    else trace_in[0, :, 0, :].T.cpu().numpy(), linestyle='dashed', label='Output', alpha=0.8)
-            else:
-                ax.plot(np.arange(self.n_t), trace_out[0, :, :].T.cpu().numpy() if i == 1 \
-                    else trace_rec[0, :, :, :].reshape(self.n_rec * self.n_rec, self.n_t).T.cpu().numpy() if i == 2 \
-                    else trace_in[0, :, :, :].reshape(self.n_rec * self.n_in, self.n_t).T.cpu().numpy(),
-                        linestyle='dashed', label='Output', alpha=0.8)
-        elif self.t_crop != 0:
-            ax.plot(np.arange(self.n_t)[-self.t_crop:], L[0, :, -self.t_crop:].T.cpu().numpy(), linestyle='dashed',
-                    label='Output', alpha=0.8)
-        else:
-            ax.plot(np.arange(self.n_t), L[0, :, :].T.cpu().numpy(), linestyle='dashed', label='Output', alpha=0.8)
+    # # Plot pseudo-derivatives  # hot_pot
+    # ax = ax_list[6]
+    # ax.imshow(h[:, 0, :].T.cpu().numpy(), aspect='auto', cmap='coolwarm', interpolation='nearest')
+    # ax.set_xlabel('Time steps')
+    # ax.set_ylabel('Surrogate Derivative Value')
+    # ax.set_title('Pseudo-derivatives (h)')
 
-    ax.set_xlim([0, self.n_t])
-    ax.set_xlabel('Time in ms')
+    # Plot pseudo-derivatives  # model.h shape: torch.Size([11, 128, 300])
+    ax = ax_list[6]
+    for j in range(1, 6):  # change the i-th rec neuron
+        ax.plot(np.arange(model.n_t), h[:, 0, j].T.cpu().numpy())
+    ax.set_xlabel('Time steps')
+    ax.set_ylabel('Surrogate Derivative')
+    ax.set_title('Pseudo-derivatives (h)')
 
-    # Short wait time to draw with interactive python
-    plt.draw()
-    plt.pause(0.1)
-
-
-def __repr__(self):
-    return self.__class__.__name__ + ' (' \
-        + str(self.n_in) + ' -> ' \
-        + str(self.n_rec) + ' -> ' \
-        + str(self.n_out) + ') '
-
-
-
+    # Adjust the layout and display the plots
+    fig.tight_layout()
+    fig.canvas.draw()
+    fig.canvas.flush_events()
