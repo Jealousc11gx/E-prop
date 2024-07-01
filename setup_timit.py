@@ -1,43 +1,40 @@
 import os
-import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import pickle
+from torch.nn.utils.rnn import pad_sequence
 
 
 class TIMITDataset(Dataset):
-    def __init__(self, data_path, split='train'):
-        self.data_path = data_path
+    def __init__(self, data_path, label_path, split='train'):
+
+        data_file = os.path.join(data_path, f"{split}_mfccs.pickle")
+        label_file = os.path.join(label_path, f"{split}_reduced_phonems.pickle")
+
+        with open(data_file, 'rb') as f:
+            self.data = pickle.load(f)
+        with open(label_file, 'rb') as f:
+            self.label = pickle.load(f)
+
         self.split = split
 
-        # 加载数据
-        self.data = self.load_data()
-
     def __getitem__(self, index):
-        return self.data[index]
+        features = torch.from_numpy((self.data[index])).float()
+        labels = torch.from_numpy((self.label[index])).long()
+
+        return features, labels
 
     def __len__(self):
         return len(self.data)
 
-    def load_data(self):
-        # 加载音频特征
-        features_path = os.path.join(self.data_path, self.split, 'filter_banks.pickle')
-        with open(features_path, 'rb') as f:
-            features = pickle.load(f)
 
-        # 加载音素标签
-        labels_path = os.path.join(self.data_path, self.split, 'reduced_phonems.pickle')
-        with open(labels_path, 'rb') as f:
-            labels = pickle.load(f)
+def collate_fn(batch):
+    features, labels = zip(*batch)
+    seq_lengths = torch.Tensor([len(seq) for seq in features])
+    padded_features = pad_sequence(features, batch_first=True)
+    padded_labels = pad_sequence(labels, batch_first=True, padding_value=-1)
 
-        # 将数据和标签转换为PyTorch张量
-        features = [torch.from_numpy(feat).float() for feat in features]
-        labels = [torch.from_numpy(label).long() for label in labels]
-
-        # 将数据和标签组合成元组列表
-        data = [(feat, label) for feat, label in zip(features, labels)]
-
-        return data
+    return seq_lengths, padded_features, padded_labels
 
 
 def setup(args):
@@ -48,19 +45,24 @@ def setup(args):
     else:
         device = torch.device('cpu')
     print("=== TIMIT dataset ===")
-    train_loader, val_loader, test_loader = load_timit_dataset(args.data_path, args.batch_size)
+    train_loader, val_loader, test_loader = load_timit_dataset(args.data_path, args.label_path, args.batch_size)
     return device, train_loader, val_loader, test_loader
 
 
-def load_timit_dataset(data_path, batch_size):
-    # 创建数据集
-    train_dataset = TIMITDataset(data_path, split='train')
-    val_dataset = TIMITDataset(data_path, split='validation')
-    test_dataset = TIMITDataset(data_path, split='test')
+def load_timit_dataset(data_path, label_path, batch_size, subset_ratio=0.003):
+    print('Loading data ...')
+    train_dataset = TIMITDataset(data_path, label_path, split='train')
+    val_dataset = TIMITDataset(data_path, label_path, split='val')
+    test_dataset = TIMITDataset(data_path, label_path, split='test')
 
-    # 创建数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    # Subset of the training data
+    subset_size = int(subset_ratio * len(train_dataset))
+    subset_size_val = int(0.025 * len(val_dataset))
+    train_dataset, _ = random_split(train_dataset, [subset_size, len(train_dataset) - subset_size])
+    val_dataset, _ = random_split(val_dataset, [subset_size_val, len(val_dataset) - subset_size_val])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, drop_last=False)
 
     return train_loader, val_loader, test_loader

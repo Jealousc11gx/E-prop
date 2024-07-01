@@ -2,7 +2,7 @@
 # Author： Chen Linliang
 import torch
 import torch.nn as nn
-import torch.nn.functional as F 
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
@@ -46,6 +46,7 @@ class SRNN(nn.Module):
         self.trace_rec_bw = None
         self.h_bw = None
         self.lowpassz_bw = None
+        self.trace_out = None
 
         self.z_cat = None
         self.vo = None
@@ -60,8 +61,9 @@ class SRNN(nn.Module):
         self.w_in_bw = nn.Parameter(torch.Tensor(n_rec, n_in))
         self.w_rec_fw = nn.Parameter(torch.Tensor(n_rec, n_rec))
         self.w_rec_bw = nn.Parameter(torch.Tensor(n_rec, n_rec))
+        self.w_out = nn.Parameter(torch.Tensor(n_out, n_rec * 2))
         self.reset_parameters(w_init_gain)  # the initialization of weight matrix 何凯明的增益权重
-        self.decay = 0.95
+        self.decay = 0.6
 
         # classifier layer
         self.classifier = nn.Linear(2 * n_rec, n_out)
@@ -73,7 +75,7 @@ class SRNN(nn.Module):
         self.writer.add_histogram('w_rec_bw', self.w_rec_bw, 0)
         self.writer.add_histogram('w_in_fw', self.w_in_fw, 0)
         self.writer.add_histogram('w_rec_fw', self.w_rec_fw, 0)
-        self.writer.add_histogram('w_out', self.classifier.weight.data, 0)
+        self.writer.add_histogram('w_out', self.w_out, 0)
 
         self.batch_count = 0
 
@@ -82,7 +84,6 @@ class SRNN(nn.Module):
         # forward
         torch.nn.init.kaiming_normal_(self.w_in_fw)  # 对w_in进行何凯明初始化
         self.w_in_fw.data = gain[0] * self.w_in_fw.data
-
         torch.nn.init.kaiming_normal_(self.w_rec_fw)
         self.w_rec_fw.data = gain[1] * self.w_rec_fw.data
         # backward
@@ -91,8 +92,8 @@ class SRNN(nn.Module):
         torch.nn.init.kaiming_normal_(self.w_rec_bw)
         self.w_rec_bw.data = gain[1] * self.w_rec_bw.data
         # output
-        # torch.nn.init.kaiming_normal_(self.classifier.weight)
-        # self.classifier.weight.data = gain[2] * self.classifier.weight.data
+        torch.nn.init.kaiming_normal_(self.w_out)
+        self.w_out.data = gain[2] * self.w_out.data
 
     # 初始化网络
     def init_net(self, n_b, n_t, n_rec, n_out):
@@ -108,6 +109,9 @@ class SRNN(nn.Module):
         self.v_bw = torch.zeros(n_t, n_b, n_rec).to(self.device)
         # Visible state
         self.z_bw = torch.zeros(n_t, n_b, n_rec).to(self.device)
+        self.z_cat = torch.zeros(n_t, n_b, 2 * n_rec).to(self.device)
+
+        self.vo = torch.zeros(n_t, n_b, n_out).to(self.device)
 
         # Weight gradients
         self.w_in_bw.grad = torch.zeros_like(self.w_in_bw)
@@ -116,6 +120,7 @@ class SRNN(nn.Module):
         self.w_in_fw.grad = torch.zeros_like(self.w_in_fw)
         self.w_rec_fw.grad = torch.zeros_like(self.w_rec_fw)
 
+        self.w_out.grad = torch.zeros_like(self.w_out)
 
 
     # def exp_convolve(self, tensor, decay):
@@ -132,12 +137,16 @@ class SRNN(nn.Module):
     #     return result
 
 
-    def exp_convolve(self, tensor, decay):
-        result = torch.zeros_like(tensor)
-        result[0] = tensor[0]
-        for t in range(1, tensor.size(0)):
-            result[t] = result[t - 1] * decay + tensor[t]
-        return result
+    # @staticmethod
+    # def exp_convolve(tensor, decay):
+    #     # 优化版本的指数衰减卷积
+    #     result = torch.zeros_like(tensor)
+    #     result[:, 0] = tensor[:, 0]
+    #     for t in range(1, tensor.size(1)):
+    #         result[:, t] = result[:, t - 1] * decay + tensor[:, t]
+    #     return result
+
+
 
     # 前向传播，返回膜电位vo
     def forward(self, args, x, seq_lengths, yt, do_training, mask):  # output = model(data, onehot_labels_yt, do_training)
@@ -152,45 +161,28 @@ class SRNN(nn.Module):
 
         # forward
         x_padded, _ = pad_packed_sequence(packed_x, batch_first=True, padding_value=0.0)
+        # backward
+        x_padded_bw = torch.flip(x_padded, [1])
         for t in range(self.n_t-1):  # Computing the network state and outputs for the whole sample duration
             # Forward pass - Hidden state:  v: recurrent layer membrane potential
             #                Visible state: z: recurrent layer spike output,
             #                               vo: output layer membrane potential (yo incl. activation function)
             x_t = x_padded[:, t, :].to(self.device)
-            # x_t = self.bn_in(x_t)
-            # x_t = self.dropout(x_t)
-
             self.v_fw[t + 1] = (((self.alpha * self.v_fw[t] + torch.mm(self.z_fw[t], self.w_rec_fw.t()) +
                                 torch.mm(x_t, self.w_in_fw.t()))-self.z_fw[t] * self.thr)+torch.randn(self.v_fw[t + 1].shape)
                                 .to(self.device))
             self.z_fw[t + 1] = (self.v_fw[t + 1] > self.thr).int()
-            # there is no LIF output neuron
 
-        # backward
-        x_padded_bw = torch.flip(x_padded, [1])
-        for t in range(self.n_t-1):  # Computing the network state and outputs for the whole sample duration
-            # backward pass - Hidden state:  v: recurrent layer membrane potential
-            #                Visible state: z: recurrent layer spike output,
-            #                               vo: output layer membrane potential (yo incl. activation function)
             x_t_bw = x_padded_bw[:, t, :].to(self.device)
-            # x_t = self.bn_in(x_t)
-            # x_t = self.dropout(x_t)
-
             self.v_bw[t + 1] = (((self.alpha * self.v_bw[t] + torch.mm(self.z_bw[t], self.w_rec_bw.t()) +
                                 torch.mm(x_t_bw, self.w_in_bw.t()))-self.z_bw[t] * self.thr)+torch.randn(self.v_bw[t + 1].shape)
                                 .to(self.device))
-
-            # self.v[t + 1] = self.bn_rec(self.v[t + 1])
             self.z_bw[t + 1] = (self.v_bw[t + 1] > self.thr).int()
+            # 计算vo
+            self.z_cat[t + 1] = torch.cat([self.z_fw[t + 1], self.z_bw[self.n_t - t - 2]], dim=1)  # 注意后向的索引
+            self.vo[t + 1] = self.kappa * self.vo[t] + torch.mm(self.z_cat[t + 1], self.w_out.t()) + self.b_o
 
-        # z_fw_continuous = self.exp_convolve(self.z_fw, self.decay)
-        # z_bw_continuous = self.exp_convolve(self.z_bw, self.decay)
-        # z_bw_continuous_reverse = torch.flip(z_bw_continuous, [0])
-        # self.z_cat = torch.cat((z_fw_continuous, z_bw_continuous_reverse), dim=2)
-        # #
-        self.z_cat = torch.cat((self.z_fw, self.z_bw), dim=2)
 
-        self.vo = self.classifier(self.z_cat)
 
         if do_training:  # 这里的逻辑可以删除
             softmax_vo = F.softmax(self.vo.permute(1, 0, 2), dim=2)  # 对于参与error计算的vo还需要做一个softmax和转置, b , t ,o
@@ -257,7 +249,6 @@ class SRNN(nn.Module):
 
         x_bw = torch.flip(x, [1])
         mask_bw = torch.flip(mask, [1])
-        classifier_weight = self.classifier.weight.data
 
         # compute input eligibility trace
         # shape n_b, n_rec, n_in , n_t
@@ -309,15 +300,15 @@ class SRNN(nn.Module):
 
         # compute output eligibility trace
         # shape: n_b, n_rec, n_t
-        # self.trace_out = F.conv1d(self.z.permute(1, 2, 0), kappa_conv.expand(self.n_rec, -1, -1), padding=self.n_t,
-        #                           groups=self.n_rec)[:, :, 1:self.n_t + 1]
+        self.trace_out = F.conv1d(self.z_cat.permute(1, 2, 0), kappa_conv.expand(self.n_rec * 2, -1, -1), padding=self.n_t,
+                                  groups=self.n_rec * 2)[:, :, 1:self.n_t + 1]
 
 
         # compute the error
         err = yo - yt
 
         # Learning Signal: error * w_out
-        self.L = torch.einsum('tbo,or->brt', err.permute(1, 0, 2), classifier_weight)
+        self.L = torch.einsum('tbo,or->brt', err.permute(1, 0, 2), self.w_out)
         self.L_fw = self.L[:, :self.n_rec, :]
         self.L_bw = self.L[:, self.n_rec:, :]
 
@@ -331,7 +322,11 @@ class SRNN(nn.Module):
                                                            dim=(0, 3))
         self.w_rec_bw.grad += self.lr_layer[1] * torch.sum(self.L_bw.unsqueeze(2).expand(-1, -1, self.n_rec, -1) * self.trace_rec_bw,
                                                            dim=(0, 3))
-
+        self.w_out.grad += self.lr_layer[2] * torch.einsum('tbo,brt->or', err.permute(1, 0, 2), self.trace_out)
+        # print(f"grad is{self.w_rec.grad}")
+        # print(f"w_rec is{self.w_rec}")
+        # print(f"差值是 {self.w_rec - self.w_rec.grad}")
+        # self.w_out.grad += self.lr_layer[2] * torch.einsum('tbo,brt->or', err.permute(1, 0, 2), self.trace_out)
 
 
     def __repr__(self):
